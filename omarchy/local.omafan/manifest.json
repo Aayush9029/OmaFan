@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "local.omafan",
+  "name": "OmaFan",
+  "version": "0.0.1",
+  "author": "Aayush Pokharel",
+  "license": "MIT",
+  "description": "Fan curves, profiles, and live CPU, GPU, and fan readings for the Framework Desktop.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "OmaFan",
+    "description": "Pick a fan profile or draw a custom fan curve.",
+    "category": "System",
+    "aliases": ["fan", "fans", "cooling", "temperature"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
