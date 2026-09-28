@@ -8,8 +8,8 @@ import "Model.js" as Model
 
 Panel {
   id: app
-  moduleName: "local.omafan"
-  ipcTarget: "local.omafan"
+  moduleName: "io.github.aayush9029.omafan"
+  ipcTarget: "io.github.aayush9029.omafan"
   manageIpc: false
 
   // Last `omafan status --json`, or null before the first reply.

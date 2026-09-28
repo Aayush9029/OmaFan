@@ -1,6 +1,6 @@
 // Package curve evaluates fan curves: fan percent as a function of temperature.
 //
-// The math matches omarchy/local.omafan/Model.js so the panel draws exactly the
+// The math matches omarchy/Model.js so the panel draws exactly the
 // curve the daemon applies: a monotone cubic (Fritsch-Carlson) through the
 // points, flat before the first point and after the last.
 package curve

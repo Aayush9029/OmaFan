@@ -7,10 +7,10 @@ set -euo pipefail
 BIN=/usr/local/bin/omafan
 UNIT=/etc/systemd/system/omafan.service
 RULE=/etc/udev/rules.d/60-omafan.rules
-PLUGIN_ID=local.omafan
-PLUGIN_ROOT="${HOME}/.config/omarchy/plugins/${PLUGIN_ID}"
+PLUGIN_ID=io.github.aayush9029.omafan
+PLUGINS="${HOME}/.config/omarchy/plugins"
+PLUGIN_ROOT="${PLUGINS}/${PLUGIN_ID}"
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-plugin_src="$project_dir/omarchy/$PLUGIN_ID"
 
 fail() {
   printf 'OmaFan: %s\n' "$1" >&2
@@ -31,14 +31,15 @@ uninstall() {
   sudo rm -rf /var/lib/omafan
   sudo systemctl daemon-reload
   sudo udevadm control --reload 2>/dev/null || true
-  if [[ -d $PLUGIN_ROOT ]]; then
+  for id in "$PLUGIN_ID" local.omafan; do
+    [[ -d "$PLUGINS/$id" ]] || continue
     if have_omarchy; then
-      omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
-      omarchy plugin remove "$PLUGIN_ID" --yes >/dev/null 2>&1 || rm -rf "$PLUGIN_ROOT"
+      omarchy plugin disable "$id" >/dev/null 2>&1 || true
+      omarchy plugin remove "$id" --yes >/dev/null 2>&1 || rm -rf "${PLUGINS:?}/$id"
     else
-      rm -rf "$PLUGIN_ROOT"
+      rm -rf "${PLUGINS:?}/$id"
     fi
-  fi
+  done
   printf 'OmaFan removed. The firmware controls the fans again.\n'
 }
 
@@ -58,7 +59,7 @@ command -v systemctl >/dev/null || fail "systemd is required"
 
 # Check the widget before touching the system, so a bad checkout can't half-install.
 if have_omarchy; then
-  omarchy plugin validate "$plugin_src" >/dev/null || fail "the Omarchy widget in $plugin_src is invalid"
+  omarchy plugin validate "$project_dir" >/dev/null || fail "the Omarchy widget in $project_dir is invalid"
 fi
 
 build_dir="$(mktemp -d)"
@@ -81,9 +82,14 @@ if ! sudo systemctl is-active --quiet omafan.service; then
 fi
 
 if have_omarchy; then
-  mkdir -p "$PLUGIN_ROOT"
-  find "$PLUGIN_ROOT" -mindepth 1 -maxdepth 1 -type f -delete
-  cp "$plugin_src"/* "$PLUGIN_ROOT"/
+  # Earlier versions installed the widget as local.omafan.
+  if [[ -d "$PLUGINS/local.omafan" ]]; then
+    omarchy plugin remove local.omafan --yes >/dev/null 2>&1 || rm -rf "$PLUGINS/local.omafan"
+  fi
+  rm -rf "$PLUGIN_ROOT"
+  mkdir -p "$PLUGIN_ROOT/omarchy"
+  cp "$project_dir/manifest.json" "$PLUGIN_ROOT/"
+  cp "$project_dir"/omarchy/* "$PLUGIN_ROOT/omarchy/"
   omarchy-shell -q shell rescanPlugins
   if [[ "$(plugin_state)" != enabled ]]; then
     omarchy plugin enable "$PLUGIN_ID" --section right --before omarchy.monitor
