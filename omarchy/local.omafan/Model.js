@@ -102,6 +102,21 @@ function evaluate(points, temp) {
   return last.f
 }
 
+// "45:25,68:55,85:90", the form `omafan curve` takes.
+function formatPoints(points) {
+  return points.map(function(p) { return Math.round(p.t) + ":" + Math.round(p.f) }).join(",")
+}
+
+function validPoints(points) {
+  if (!points || points.length < 2 || points.length > 4) return false
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i]
+    if (typeof p.t !== "number" || typeof p.f !== "number") return false
+    if (i > 0 && p.t - points[i - 1].t < 5) return false
+  }
+  return true
+}
+
 function formatRpm(rpm) {
   var n = Math.max(0, Math.round(Number(rpm) || 0))
   return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",")

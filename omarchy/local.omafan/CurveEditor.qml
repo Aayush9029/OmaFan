@@ -9,6 +9,10 @@ Item {
 
   property var points: []
   property real currentTemp: 0
+  // Only the temperature glides; the dot's height is always read off the curve,
+  // so it stays on the line while points are dragged.
+  property real displayTemp: currentTemp
+  Behavior on displayTemp { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
   property bool interactive: true
   property color foreground: Color.foreground
   property color surface: Color.background
@@ -26,7 +30,7 @@ Item {
   readonly property real plotY: topPad
   readonly property real plotW: Math.max(1, width - axisWidth - rightPad)
   readonly property real plotH: Math.max(1, height - topPad - axisHeight)
-  readonly property real currentFan: Model.evaluate(points, currentTemp)
+  readonly property real currentFan: Model.evaluate(points, displayTemp)
 
   implicitHeight: Style.space(196)
 
@@ -37,7 +41,7 @@ Item {
   function tint(a) { return Qt.rgba(foreground.r, foreground.g, foreground.b, a) }
 
   onPointsChanged: plot.requestPaint()
-  onCurrentTempChanged: plot.requestPaint()
+  onDisplayTempChanged: plot.requestPaint()
   onWidthChanged: plot.requestPaint()
   onHeightChanged: plot.requestPaint()
   onForegroundChanged: plot.requestPaint()
@@ -101,7 +105,7 @@ Item {
       ctx.stroke()
 
       // Live temperature: a dashed guide down to the axis.
-      var cx = Math.round(editor.xFor(Model.clamp(editor.currentTemp, Model.tempMin, Model.tempMax))) + 0.5
+      var cx = Math.round(editor.xFor(Model.clamp(editor.displayTemp, Model.tempMin, Model.tempMax))) + 0.5
       var cy = editor.yFor(editor.currentFan)
       ctx.lineWidth = 1
       ctx.strokeStyle = editor.tint(0.35)
@@ -145,12 +149,10 @@ Item {
   // Where the fan is right now.
   Item {
     id: liveDot
-    x: editor.xFor(Model.clamp(editor.currentTemp, Model.tempMin, Model.tempMax)) - width / 2
+    x: editor.xFor(Model.clamp(editor.displayTemp, Model.tempMin, Model.tempMax)) - width / 2
     y: editor.yFor(editor.currentFan) - height / 2
     width: Style.space(8)
     height: width
-    Behavior on x { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
-    Behavior on y { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
 
     Rectangle {
       anchors.centerIn: parent

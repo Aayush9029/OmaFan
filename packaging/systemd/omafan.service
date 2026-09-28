@@ -1,0 +1,40 @@
+[Unit]
+Description=OmaFan fan control for the Framework Desktop
+Documentation=https://github.com/Aayush9029/OmaFan
+ConditionPathExists=/dev/cros_ec
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/omafan daemon
+# Runs after every stop, including crashes: the firmware always gets the fans back.
+ExecStopPost=/usr/local/bin/omafan restore
+Restart=on-failure
+RestartSec=2
+StateDirectory=omafan
+RuntimeDirectory=omafan
+RuntimeDirectoryMode=0755
+
+DevicePolicy=closed
+DeviceAllow=/dev/cros_ec rw
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

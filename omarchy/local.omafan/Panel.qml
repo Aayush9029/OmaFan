@@ -1,5 +1,4 @@
 import QtQuick
-import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -13,74 +12,170 @@ Panel {
   ipcTarget: "local.omafan"
   manageIpc: false
 
-  // Design preview: telemetry is simulated and nothing touches the fans yet.
-  readonly property bool demo: true
-
-  property bool controlEnabled: true
-  property string profile: "balanced"
-  property var customPoints: Model.clone(Model.presets.balanced)
-  property var appliedCustom: Model.clone(Model.presets.balanced)
-  property real cpuTemp: 61
-  property real gpuTemp: 52
+  // Last `omafan status --json`, or null before the first reply.
+  property var snapshot: null
+  property string lastError: ""
+  property string actionError: ""
   property int selectedIndex: 0
   property bool cursorActive: false
+  // Optimistic state while a command runs, so the UI answers the click at once.
+  property int desiredEnabled: -1
+  property string desiredProfile: ""
+  // Custom curve being dragged or saved; null once the daemon has it.
+  property var draft: null
+  property string sentDraft: ""
 
-  readonly property var points: profile === "custom" ? customPoints : Model.presets[profile]
-  readonly property bool dirty: JSON.stringify(customPoints) !== JSON.stringify(appliedCustom)
-  readonly property real fanPercent: controlEnabled ? Model.evaluate(points, cpuTemp) : 34
-  readonly property int maxRpm: 3300
-  readonly property int fanRpm: Math.round(fanPercent / 100 * maxRpm)
+  readonly property bool connected: snapshot !== null && lastError === ""
+  readonly property bool busy: actionProc.running
+  readonly property bool controlEnabled: desiredEnabled >= 0 ? desiredEnabled === 1 : (snapshot ? snapshot.enabled === true : false)
+  readonly property string profile: draft ? "custom" : (desiredProfile !== "" ? desiredProfile : (snapshot ? String(snapshot.profile || "balanced") : "balanced"))
+  readonly property var savedCustom: snapshot && Model.validPoints(snapshot.custom) ? snapshot.custom : Model.presets.balanced
+  readonly property var points: {
+    if (draft) return draft
+    if (profile === "custom") return savedCustom
+    if (snapshot && snapshot.presets && Model.validPoints(snapshot.presets[profile])) return snapshot.presets[profile]
+    return Model.presets[profile] || Model.presets.balanced
+  }
+  readonly property string controller: snapshot ? String(snapshot.controller || "firmware") : "firmware"
+  readonly property bool driving: controller === "omafan" || controller === "emergency"
+
+  readonly property real cpuTemp: num(snapshot ? snapshot.cpu : null, num(snapshot ? snapshot.apu : null, 0))
+  readonly property real gpuTemp: num(snapshot ? snapshot.gpu : null, 0)
+  readonly property real controlTemp: num(snapshot ? snapshot.temp : null, cpuTemp)
+  readonly property int fanRpm: snapshot ? Number(snapshot.fanRpm || 0) : 0
+  // Duty when OmaFan drives; otherwise RPM against the EC's 2300 RPM ceiling.
+  readonly property real fanPercent: snapshot && snapshot.duty !== null && snapshot.duty !== undefined
+    ? Number(snapshot.duty) : Math.min(100, fanRpm / 2300 * 100)
+
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color muted: Qt.darker(foreground, 1.4)
   readonly property string fanGlyph: "\u{F0210}"
 
+  function num(v, fallback) {
+    return v === null || v === undefined || !isFinite(Number(v)) ? fallback : Number(v)
+  }
+
   function stateText() {
+    if (!snapshot || lastError !== "") return "Service unavailable"
+    if (controller === "emergency") return "Full speed · running hot"
     if (!controlEnabled) return "Firmware auto"
-    if (profile === "custom" && dirty) return "Custom · not applied"
+    if (!driving) return "Waiting for sensors"
     return Model.profileLabel(profile) + " curve"
   }
 
+  function refresh() {
+    if (statusProc.running) return
+    statusProc.running = true
+  }
+
+  function run(args) {
+    if (busy) return
+    actionError = ""
+    actionProc.command = ["omafan"].concat(args)
+    actionProc.running = true
+  }
+
+  function setEnabled(on) {
+    if (!connected) return
+    desiredEnabled = on ? 1 : 0
+    run([on ? "enable" : "disable"])
+  }
+
   function selectProfile(value) {
-    if (!controlEnabled) return
-    if (value === "custom" && profile !== "custom") customPoints = Model.clone(appliedCustom)
-    profile = value
+    if (!controlEnabled || !connected) return
+    saveTimer.stop()
+    draft = null
+    desiredProfile = value
+    run(["profile", value])
   }
 
-  // Dragging a preset's point forks it into the custom curve.
+  // Dragging any curve's point switches to a custom curve, saved shortly after
+  // the last change so a drag doesn't send a command per pixel.
   function editCurve(next) {
-    if (!controlEnabled) return
-    customPoints = next
-    profile = "custom"
+    if (!controlEnabled || !connected) return
+    draft = next
+    saveTimer.restart()
   }
 
-  function applyCurve() { appliedCustom = Model.clone(customPoints) }
-  function resetCurve() { customPoints = Model.clone(appliedCustom) }
+  function saveCurve() {
+    if (!draft) return
+    if (busy) { saveTimer.restart(); return }
+    desiredProfile = "custom"
+    sentDraft = Model.formatPoints(draft)
+    run(["curve", sentDraft])
+  }
+
+  Timer {
+    id: saveTimer
+    interval: 250
+    onTriggered: app.saveCurve()
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onOpenedChanged: if (opened) { cursorActive = false; selectedIndex = 0 }
+  Component.onCompleted: refresh()
+  onOpenedChanged: if (opened) { cursorActive = false; selectedIndex = 0; refresh() }
 
   Timer {
-    interval: 1400
-    running: app.demo
+    interval: Math.max(500, Number(settings.refreshIntervalMs || 1000))
+    running: true
     repeat: true
-    onTriggered: {
-      app.cpuTemp = Model.clamp(app.cpuTemp + (Math.random() - 0.48) * 4, 44, 82)
-      app.gpuTemp = Model.clamp(app.cpuTemp - 9 + (Math.random() - 0.5) * 3, 38, 76)
+    onTriggered: app.refresh()
+  }
+
+  Process {
+    id: statusProc
+    command: ["omafan", "status", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var raw = String(text || "").trim()
+        if (raw === "") return
+        try {
+          app.snapshot = JSON.parse(raw)
+          app.lastError = ""
+          if (!actionProc.running) { app.desiredEnabled = -1; app.desiredProfile = "" }
+        } catch (error) {
+          app.lastError = "Invalid reply from omafan"
+        }
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var message = String(text || "").trim()
+        if (message !== "") app.lastError = message.replace(/^omafan:\s*/, "")
+      }
     }
   }
 
-  Behavior on cpuTemp { NumberAnimation { duration: 900; easing.type: Easing.OutCubic } }
-  Behavior on gpuTemp { NumberAnimation { duration: 900; easing.type: Easing.OutCubic } }
+  Process {
+    id: actionProc
+    stdout: StdioCollector { waitForEnd: true }
+    stderr: StdioCollector { id: actionStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var wasCurve = String(actionProc.command[1]) === "curve"
+      if (exitCode === 0) {
+        // Keep a newer drag that arrived while this one was saving.
+        if (wasCurve && app.draft && Model.formatPoints(app.draft) === app.sentDraft && !saveTimer.running) app.draft = null
+      } else {
+        if (wasCurve) app.draft = null
+        app.desiredEnabled = -1
+        app.desiredProfile = ""
+        app.actionError = String(actionStderr.text || "").trim().replace(/^omafan:\s*/, "") || "Couldn't change the fan settings."
+      }
+      app.refresh()
+    }
+  }
 
   IpcHandler {
     target: app.ipcTarget
     function open(): void { app.open() }
     function close(): void { app.close() }
     function toggle(): void { app.toggle() }
-    function profile(value: string): string { app.selectProfile(value); return app.profile }
+    function refresh(): string { app.refresh(); return "ok" }
   }
 
   BarIconButton {
@@ -89,13 +184,18 @@ Panel {
     bar: app.bar
     text: app.fanGlyph
     fontFamily: "JetBrainsMono Nerd Font"
-    active: app.controlEnabled
-    tooltipText: "OmaFan · " + Model.formatRpm(app.fanRpm) + " RPM · " + Math.round(app.cpuTemp) + "°"
-    onPressed: function(mouseButton) { app.toggle() }
+    active: app.driving
+    tooltipText: app.snapshot
+      ? "OmaFan · " + Model.formatRpm(app.fanRpm) + " RPM · " + Math.round(app.controlTemp) + "°"
+      : "OmaFan · service unavailable"
+    onPressed: function(mouseButton) {
+      if (mouseButton === Qt.MiddleButton) app.refresh()
+      else app.toggle()
+    }
   }
 
-  // Cursor order: toggle, four profiles, reset, apply.
-  readonly property int cursorCount: 7
+  // Cursor order: toggle, then the four profiles.
+  readonly property int cursorCount: 5
 
   function moveCursor(delta) {
     cursorActive = true
@@ -103,10 +203,8 @@ Panel {
   }
 
   function activateCursor() {
-    if (selectedIndex === 0) controlEnabled = !controlEnabled
-    else if (selectedIndex <= 4) selectProfile(Model.profiles[selectedIndex - 1].value)
-    else if (selectedIndex === 5 && dirty) resetCurve()
-    else if (selectedIndex === 6 && dirty) applyCurve()
+    if (selectedIndex === 0) setEnabled(!controlEnabled)
+    else selectProfile(Model.profiles[selectedIndex - 1].value)
   }
 
   KeyboardPanel {
@@ -138,7 +236,7 @@ Panel {
           meta: app.stateText()
           foreground: app.foreground
           fontFamily: app.fontFamily
-          iconOpacity: app.controlEnabled ? 1 : 0.5
+          iconOpacity: app.driving ? 1 : 0.5
           iconComponent: Component {
             Text {
               text: app.fanGlyph
@@ -150,7 +248,7 @@ Panel {
                 from: 0
                 to: 360
                 loops: Animation.Infinite
-                duration: Math.round(24000 / Math.max(0.15, app.fanPercent / 100) / 10)
+                duration: Math.round(2400 / Math.max(0.15, app.fanRpm / 2300))
                 running: app.opened && app.fanRpm > 0
               }
             }
@@ -159,10 +257,12 @@ Panel {
             ToggleSwitch {
               id: controlSwitch
               checked: app.controlEnabled
+              busy: app.busy && app.desiredEnabled >= 0
+              interactive: app.connected
               foreground: app.foreground
               hasCursor: app.cursorActive && app.selectedIndex === 0
               onHovered: function(on) { if (on) { app.cursorActive = true; app.selectedIndex = 0 } }
-              onToggled: app.controlEnabled = !app.controlEnabled
+              onToggled: app.setEnabled(!app.controlEnabled)
               PanelToolTip {
                 visible: controlSwitch.containsMouse
                 text: app.controlEnabled ? "OmaFan is driving the fans · turn off for firmware auto" : "Firmware is driving the fans · turn on to use a curve"
@@ -176,10 +276,11 @@ Panel {
         Row {
           width: parent.width
           spacing: Style.space(12)
+          opacity: app.snapshot ? 1 : 0.45
           readonly property real cell: (width - spacing * 2) / 3
 
-          StatCell { width: parent.cell; label: "CPU"; value: Math.round(app.cpuTemp); unit: "°C"; fraction: app.cpuTemp / 100 }
-          StatCell { width: parent.cell; label: "GPU"; value: Math.round(app.gpuTemp); unit: "°C"; fraction: app.gpuTemp / 100 }
+          StatCell { width: parent.cell; label: "CPU"; value: app.snapshot ? Math.round(app.cpuTemp) : "—"; unit: "°C"; fraction: app.cpuTemp / 100 }
+          StatCell { width: parent.cell; label: "GPU"; value: app.snapshot && app.snapshot.gpu !== null ? Math.round(app.gpuTemp) : "—"; unit: "°C"; fraction: app.gpuTemp / 100 }
           StatCell { width: parent.cell; label: "Fan"; value: Model.formatRpm(app.fanRpm); unit: "RPM"; fraction: app.fanPercent / 100 }
         }
 
@@ -189,7 +290,7 @@ Panel {
         Column {
           width: parent.width
           spacing: Style.space(10)
-          opacity: app.controlEnabled ? 1 : 0.45
+          opacity: app.controlEnabled && app.connected ? 1 : 0.45
           Behavior on opacity { NumberAnimation { duration: 160 } }
 
           PanelSectionHeader { text: "FAN PROFILE"; foreground: app.foreground; fontFamily: app.fontFamily }
@@ -215,7 +316,7 @@ Panel {
                 horizontalPadding: Style.spacing.controlPaddingX
                 verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
                 bordered: true
-                enabled: app.controlEnabled
+                enabled: app.controlEnabled && app.connected && !app.busy
                 active: app.profile === modelData.value
                 hasCursor: app.cursorActive && app.selectedIndex === index + 1
                 onClicked: app.selectProfile(modelData.value)
@@ -229,7 +330,7 @@ Panel {
         Column {
           width: parent.width
           spacing: Style.space(8)
-          opacity: app.controlEnabled ? 1 : 0.45
+          opacity: app.controlEnabled && app.connected ? 1 : 0.45
           Behavior on opacity { NumberAnimation { duration: 160 } }
 
           Item {
@@ -244,7 +345,9 @@ Panel {
             Text {
               anchors.right: parent.right
               anchors.verticalCenter: curveHeader.verticalCenter
-              text: Math.round(app.cpuTemp) + "°  →  " + Math.round(app.fanPercent) + "%"
+              text: app.driving
+                ? Math.round(app.controlTemp) + "°  →  " + Math.round(app.fanPercent) + "%"
+                : Math.round(app.controlTemp) + "°  ·  firmware"
               color: app.muted
               font.family: app.fontFamily
               font.pixelSize: Style.font.caption
@@ -254,55 +357,22 @@ Panel {
           CurveEditor {
             width: parent.width
             points: app.points
-            currentTemp: app.cpuTemp
-            interactive: app.controlEnabled
+            currentTemp: app.controlTemp
+            interactive: app.controlEnabled && app.connected
             foreground: app.foreground
             fontFamily: app.fontFamily
             onPointsEdited: function(next) { app.editCurve(next) }
           }
 
-          Text {
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: app.profile === "custom" ? "Drag points to shape the curve" : "Drag a point to make a custom curve"
-            color: app.muted
-            font.family: app.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
-
-        RowLayout {
-          width: parent.width
-          spacing: Style.space(8)
-          visible: app.controlEnabled && app.profile === "custom"
-          NativeButton {
-            Layout.fillWidth: true
-            Layout.preferredWidth: 1
-            text: "Reset"
-            iconText: "\u{F0450}"
-            cursorIndex: 5
-            enabled: app.dirty
-            onClicked: app.resetCurve()
-          }
-          NativeButton {
-            Layout.fillWidth: true
-            Layout.preferredWidth: 1
-            text: "Apply curve"
-            iconText: "\u{F012C}"
-            cursorIndex: 6
-            enabled: app.dirty
-            active: app.dirty
-            onClicked: app.applyCurve()
-          }
         }
 
         Text {
-          visible: app.demo
+          visible: text !== ""
           width: parent.width
-          horizontalAlignment: Text.AlignHCenter
-          text: "Design preview · simulated readings"
-          color: app.muted
-          opacity: 0.7
+          wrapMode: Text.Wrap
+          textFormat: Text.PlainText
+          text: app.actionError || app.lastError || (app.snapshot ? String(app.snapshot.error || "") : "")
+          color: app.bar ? app.bar.urgent : Color.urgent
           font.family: app.fontFamily
           font.pixelSize: Style.font.caption
         }
@@ -359,15 +429,5 @@ Panel {
         Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
       }
     }
-  }
-
-  component NativeButton: Ui.Button {
-    property int cursorIndex: -1
-    foreground: app.foreground
-    fontFamily: app.fontFamily
-    bordered: true
-    opacity: enabled ? 1 : 0.45
-    hasCursor: app.cursorActive && app.selectedIndex === cursorIndex
-    onHovered: function(on) { if (on) { app.cursorActive = true; app.selectedIndex = cursorIndex } }
   }
 }
