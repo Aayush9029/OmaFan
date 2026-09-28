@@ -12,8 +12,15 @@ Item {
   // Only the temperature glides; the dot's height is always read off the curve,
   // so it stays on the line while points are dragged.
   property real displayTemp: currentTemp
-  Behavior on displayTemp { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
+  property bool primed: false
+  onCurrentTempChanged: if (currentTemp > 0) primed = true
+  Behavior on displayTemp {
+    enabled: editor.primed
+    NumberAnimation { duration: 600; easing.type: Easing.OutCubic }
+  }
   property bool interactive: true
+  // Animations run only while the panel is open.
+  property bool active: true
   property color foreground: Color.foreground
   property color surface: Color.background
   property string fontFamily: Style.font.family
@@ -41,7 +48,6 @@ Item {
   function tint(a) { return Qt.rgba(foreground.r, foreground.g, foreground.b, a) }
 
   onPointsChanged: plot.requestPaint()
-  onDisplayTempChanged: plot.requestPaint()
   onWidthChanged: plot.requestPaint()
   onHeightChanged: plot.requestPaint()
   onForegroundChanged: plot.requestPaint()
@@ -103,17 +109,6 @@ Item {
       ctx.lineCap = "round"
       ctx.strokeStyle = editor.tint(editor.interactive ? 1 : 0.5)
       ctx.stroke()
-
-      // Live temperature: a dashed guide down to the axis.
-      var cx = Math.round(editor.xFor(Model.clamp(editor.displayTemp, Model.tempMin, Model.tempMax))) + 0.5
-      var cy = editor.yFor(editor.currentFan)
-      ctx.lineWidth = 1
-      ctx.strokeStyle = editor.tint(0.35)
-      ctx.beginPath()
-      for (var y = cy + 6; y < editor.plotY + editor.plotH; y += 6) {
-        ctx.moveTo(cx, y); ctx.lineTo(cx, Math.min(y + 3, editor.plotY + editor.plotH))
-      }
-      ctx.stroke()
     }
   }
 
@@ -146,6 +141,21 @@ Item {
     }
   }
 
+  // Dashed guide from the live point down to the axis. It's an item, not canvas,
+  // so a moving temperature doesn't repaint the whole plot every frame.
+  Column {
+    x: Math.round(liveDot.x + liveDot.width / 2)
+    y: liveDot.y + liveDot.height / 2 + Style.space(6)
+    width: 1
+    height: Math.max(0, editor.plotY + editor.plotH - y)
+    spacing: 3
+    clip: true
+    Repeater {
+      model: Math.ceil(editor.plotH / 6) + 1
+      Rectangle { width: 1; height: 3; color: editor.tint(0.35) }
+    }
+  }
+
   // Where the fan is right now.
   Item {
     id: liveDot
@@ -162,7 +172,7 @@ Item {
       color: editor.tint(0.18)
       SequentialAnimation on scale {
         loops: Animation.Infinite
-        running: editor.visible
+        running: editor.active && editor.visible
         NumberAnimation { from: 0.55; to: 1; duration: 1100; easing.type: Easing.OutCubic }
         NumberAnimation { from: 1; to: 0.55; duration: 900; easing.type: Easing.InOutSine }
       }

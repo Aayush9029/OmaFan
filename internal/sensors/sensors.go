@@ -59,8 +59,10 @@ type Source struct {
 	Root string
 }
 
-// ErrNoSensors means no usable temperature sensor was found.
-var ErrNoSensors = errors.New("no CPU, GPU, or EC temperature sensor found")
+// ErrNoSensors means neither CPU temperature (k10temp Tctl or the EC's APU
+// sensor) could be read. The GPU edge sensor runs cooler and lags, so it alone
+// never drives the fans.
+var ErrNoSensors = errors.New("no CPU temperature from k10temp or the EC")
 
 // Read takes one snapshot.
 func (s Source) Read() (Reading, error) {
@@ -94,7 +96,7 @@ func (s Source) Read() (Reading, error) {
 			}
 		}
 	}
-	if _, ok := r.Hottest(); !ok {
+	if r.CPU == nil && r.APU == nil {
 		return r, ErrNoSensors
 	}
 	return r, nil

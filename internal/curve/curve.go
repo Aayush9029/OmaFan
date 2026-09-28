@@ -33,9 +33,9 @@ type Point struct {
 var Profiles = []string{"quiet", "balanced", "blast", "custom"}
 
 var presets = map[string][]Point{
-	"quiet":    {{50, 20}, {75, 45}, {90, 85}},
-	"balanced": {{45, 25}, {68, 55}, {85, 90}},
-	"blast":    {{35, 55}, {55, 85}, {70, 100}},
+	"quiet":    {{45, 15}, {60, 30}, {75, 50}, {90, 85}},
+	"balanced": {{40, 20}, {55, 35}, {70, 60}, {85, 90}},
+	"blast":    {{35, 45}, {50, 65}, {62, 85}, {75, 100}},
 }
 
 // Preset returns a copy of a built-in profile's points.
@@ -74,6 +74,28 @@ func Validate(points []Point) error {
 		}
 	}
 	return nil
+}
+
+// Expand adds points in the widest gaps until the curve has MaxPoints,
+// placing each on the existing curve so its shape barely changes.
+func Expand(points []Point) []Point {
+	out := append([]Point(nil), points...)
+	for len(out) >= MinPoints && len(out) < MaxPoints {
+		wide := 0
+		for i := 1; i < len(out)-1; i++ {
+			if out[i+1].T-out[i].T > out[wide+1].T-out[wide].T {
+				wide = i
+			}
+		}
+		gap := out[wide+1].T - out[wide].T
+		if gap < 2*MinGap {
+			break
+		}
+		t := out[wide].T + gap/2
+		p := Point{T: t, F: int(math.Round(Evaluate(out, float64(t))))}
+		out = append(out[:wide+1], append([]Point{p}, out[wide+1:]...)...)
+	}
+	return out
 }
 
 // Parse reads "45:25,68:55,85:90" into validated points.

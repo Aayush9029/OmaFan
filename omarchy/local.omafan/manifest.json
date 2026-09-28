@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "local.omafan",
   "name": "OmaFan",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "author": "Aayush Pokharel",
   "license": "MIT",
   "description": "Fan curves, profiles, and live CPU, GPU, and fan readings for the Framework Desktop.",

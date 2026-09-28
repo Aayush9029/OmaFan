@@ -6,34 +6,60 @@ set -euo pipefail
 
 BIN=/usr/local/bin/omafan
 UNIT=/etc/systemd/system/omafan.service
-PLUGIN_ROOT="${HOME}/.config/omarchy/plugins/local.omafan"
+RULE=/etc/udev/rules.d/60-omafan.rules
+PLUGIN_ID=local.omafan
+PLUGIN_ROOT="${HOME}/.config/omarchy/plugins/${PLUGIN_ID}"
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+plugin_src="$project_dir/omarchy/$PLUGIN_ID"
 
 fail() {
   printf 'OmaFan: %s\n' "$1" >&2
   exit 1
 }
 
-[[ $EUID -ne 0 ]] || fail "run as your user; the script asks for sudo when it needs it"
+have_omarchy() { command -v omarchy >/dev/null && command -v omarchy-shell >/dev/null; }
 
-if [[ ${1-} == --uninstall ]]; then
+plugin_state() {
+  omarchy plugin list 2>/dev/null | awk -v id="$PLUGIN_ID" '$1 == id { print $2 }'
+}
+
+uninstall() {
   # Stopping the service returns the fans to firmware control.
   sudo systemctl disable --now omafan.service 2>/dev/null || true
-  sudo rm -f "$UNIT" "$BIN"
+  sudo systemctl reset-failed omafan.service 2>/dev/null || true
+  sudo rm -f "$UNIT" "$RULE" "$BIN"
   sudo rm -rf /var/lib/omafan
   sudo systemctl daemon-reload
-  if command -v omarchy >/dev/null && [[ -d $PLUGIN_ROOT ]]; then
-    omarchy plugin remove local.omafan --yes >/dev/null 2>&1 || rm -rf "$PLUGIN_ROOT"
+  sudo udevadm control --reload 2>/dev/null || true
+  if [[ -d $PLUGIN_ROOT ]]; then
+    if have_omarchy; then
+      omarchy plugin disable "$PLUGIN_ID" >/dev/null 2>&1 || true
+      omarchy plugin remove "$PLUGIN_ID" --yes >/dev/null 2>&1 || rm -rf "$PLUGIN_ROOT"
+    else
+      rm -rf "$PLUGIN_ROOT"
+    fi
   fi
   printf 'OmaFan removed. The firmware controls the fans again.\n'
-  exit 0
-fi
+}
+
+[[ $EUID -ne 0 ]] || fail "run as your user; the script asks for sudo when it needs it"
+
+case "${1-}" in
+  '') ;;
+  --uninstall) uninstall; exit 0 ;;
+  *) printf 'Usage: %s [--uninstall]\n' "$0" >&2; exit 2 ;;
+esac
 
 [[ "$(uname -s)" == Linux ]] || fail "Linux is required"
 [[ "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)" == Framework ]] || fail "this is not a Framework computer"
 [[ -e /dev/cros_ec ]] || fail "/dev/cros_ec is missing; the cros_ec_lpcs and cros_ec_chardev modules are required"
 command -v go >/dev/null || fail "Go is required to build OmaFan (sudo pacman -S go)"
 command -v systemctl >/dev/null || fail "systemd is required"
+
+# Check the widget before touching the system, so a bad checkout can't half-install.
+if have_omarchy; then
+  omarchy plugin validate "$plugin_src" >/dev/null || fail "the Omarchy widget in $plugin_src is invalid"
+fi
 
 build_dir="$(mktemp -d)"
 trap 'rm -rf "$build_dir"' EXIT
@@ -42,19 +68,27 @@ printf 'Building OmaFan\n'
 
 sudo install -Dm755 "$build_dir/omafan" "$BIN"
 sudo install -Dm644 "$project_dir/packaging/systemd/omafan.service" "$UNIT"
+sudo install -Dm644 "$project_dir/packaging/udev/60-omafan.rules" "$RULE"
+sudo udevadm control --reload
+sudo udevadm trigger --action=add /dev/cros_ec 2>/dev/null || true
 sudo systemctl daemon-reload
 sudo systemctl enable omafan.service >/dev/null
 sudo systemctl restart omafan.service
 
-if command -v omarchy >/dev/null && command -v omarchy-shell >/dev/null; then
+if ! sudo systemctl is-active --quiet omafan.service; then
+  sudo journalctl -u omafan.service -n 20 --no-pager >&2 || true
+  fail "the service didn't start; see the log above"
+fi
+
+if have_omarchy; then
   mkdir -p "$PLUGIN_ROOT"
-  for file in manifest.json Panel.qml CurveEditor.qml Model.js; do
-    install -m644 "$project_dir/omarchy/local.omafan/$file" "$PLUGIN_ROOT/$file"
-  done
-  omarchy plugin validate "$PLUGIN_ROOT" >/dev/null
-  timeout 10s omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
-  omarchy plugin enable local.omafan --section right --before omarchy.monitor >/dev/null 2>&1 || true
-  printf 'Omarchy widget installed\n'
+  find "$PLUGIN_ROOT" -mindepth 1 -maxdepth 1 -type f -delete
+  cp "$plugin_src"/* "$PLUGIN_ROOT"/
+  omarchy-shell -q shell rescanPlugins
+  if [[ "$(plugin_state)" != enabled ]]; then
+    omarchy plugin enable "$PLUGIN_ID" --section right --before omarchy.monitor
+  fi
+  printf 'Omarchy widget installed. If an older version is open, run: omarchy restart shell\n'
 fi
 
 printf 'OmaFan is running. The firmware keeps control until you turn it on:\n  omafan enable\n'

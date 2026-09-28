@@ -12,8 +12,8 @@ func TestEvaluatePassesThroughPointsAndIsFlatOutside(t *testing.T) {
 			t.Fatalf("Evaluate(%d) = %v, want %d", pt.T, got, pt.F)
 		}
 	}
-	if got := Evaluate(p, 20); got != 25 {
-		t.Fatalf("below first point = %v, want 25", got)
+	if got := Evaluate(p, 20); got != 20 {
+		t.Fatalf("below first point = %v, want 20", got)
 	}
 	if got := Evaluate(p, 99); got != 90 {
 		t.Fatalf("above last point = %v, want 90", got)
@@ -40,6 +40,31 @@ func TestEvaluateNeverOvershootsSteepCurve(t *testing.T) {
 		if v := Evaluate(p, temp); v < 0 || v > 100 {
 			t.Fatalf("Evaluate(%v) = %v out of range", temp, v)
 		}
+	}
+}
+
+func TestPresetsHaveFourPoints(t *testing.T) {
+	for _, name := range []string{"quiet", "balanced", "blast"} {
+		p, _ := Preset(name)
+		if len(p) != MaxPoints || Validate(p) != nil {
+			t.Fatalf("%s preset = %v", name, p)
+		}
+	}
+}
+
+func TestExpandKeepsShape(t *testing.T) {
+	old := []Point{{T: 40, F: 30}, {T: 60, F: 45}, {T: 80, F: 95}}
+	p := Expand(old)
+	if len(p) != MaxPoints || Validate(p) != nil {
+		t.Fatalf("Expand = %v", p)
+	}
+	for temp := 30.0; temp <= 100; temp++ {
+		if d := math.Abs(Evaluate(p, temp) - Evaluate(old, temp)); d > 4 {
+			t.Fatalf("shape moved by %.1f%% at %v°C", d, temp)
+		}
+	}
+	if full := Expand(p); len(full) != MaxPoints {
+		t.Fatalf("Expand grew a full curve: %v", full)
 	}
 }
 

@@ -12,10 +12,11 @@ var profiles = [
   { value: "custom", label: "Custom", icon: "\u{F062E}" }
 ]
 
+// Fallbacks only; the daemon's status carries the presets it applies.
 var presets = {
-  quiet: [{ t: 50, f: 20 }, { t: 75, f: 45 }, { t: 90, f: 85 }],
-  balanced: [{ t: 45, f: 25 }, { t: 68, f: 55 }, { t: 85, f: 90 }],
-  blast: [{ t: 35, f: 55 }, { t: 55, f: 85 }, { t: 70, f: 100 }]
+  quiet: [{ t: 45, f: 15 }, { t: 60, f: 30 }, { t: 75, f: 50 }, { t: 90, f: 85 }],
+  balanced: [{ t: 40, f: 20 }, { t: 55, f: 35 }, { t: 70, f: 60 }, { t: 85, f: 90 }],
+  blast: [{ t: 35, f: 45 }, { t: 50, f: 65 }, { t: 62, f: 85 }, { t: 75, f: 100 }]
 }
 
 function clone(points) {
@@ -85,7 +86,7 @@ function segments(points) {
 
 // Fan percent for a temperature: flat before the first and after the last point.
 function evaluate(points, temp) {
-  if (!points || points.length === 0) return 0
+  if (!points || points.length === 0) return fanMax
   if (temp <= points[0].t) return points[0].f
   var last = points[points.length - 1]
   if (temp >= last.t) return last.f

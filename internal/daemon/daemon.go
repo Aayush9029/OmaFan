@@ -33,6 +33,8 @@ const (
 	SensorGrace = 5 * time.Second
 	// Hand fans back to firmware after this many EC write failures in a row.
 	MaxECFailures = 3
+	// DefaultMaxRPM is the Framework Desktop fan speed at 100% duty.
+	DefaultMaxRPM = 2320
 )
 
 // Settings are persisted across restarts.
@@ -72,6 +74,8 @@ type Daemon struct {
 	lastSent     time.Time
 	sensorFailAt time.Time
 	ecFailures   int
+	maxRPM       int
+	stopped      bool
 	status       ipc.Status
 }
 
@@ -99,7 +103,8 @@ func (d *Daemon) Load() {
 				s.Profile = saved.Profile
 			}
 			if curve.Validate(saved.Custom) == nil {
-				s.Custom = saved.Custom
+				// Curves saved with fewer points gain one, keeping their shape.
+				s.Custom = curve.Expand(saved.Custom)
 			}
 		} else {
 			d.logf("ignoring unreadable settings %s", d.StatePath)
@@ -137,15 +142,33 @@ func (d *Daemon) points() []curve.Point {
 	return p
 }
 
-// release hands the fans to firmware. Callers hold d.mu.
-func (d *Daemon) release(reason string) {
+// release hands the fans to firmware. The fans count as manual until the EC
+// accepts, so every caller that checks d.manual retries on the next tick.
+// Callers hold d.mu.
+func (d *Daemon) release(reason string) error {
+	d.ctl.Reset()
 	if err := d.Fans.Auto(); err != nil {
-		d.logf("returning fans to firmware failed: %v", err)
-	} else if d.manual {
+		d.logf("returning fans to firmware (%s) failed: %v", reason, err)
+		return err
+	}
+	if d.manual {
 		d.logf("fans returned to firmware: %s", reason)
 	}
 	d.manual = false
-	d.ctl.Reset()
+	return nil
+}
+
+// releaseStatus records a handback, reporting a failure the next tick will retry.
+// Callers hold d.mu.
+func (d *Daemon) releaseStatus(reason string) {
+	st := &d.status
+	if err := d.release(reason); err != nil {
+		st.Error = "Couldn't return the fans to firmware, retrying: " + err.Error()
+		duty := d.lastDuty
+		st.Controller, st.Duty = ipc.ControllerOmaFan, &duty
+		return
+	}
+	st.Controller, st.Duty = ipc.ControllerFirmware, nil
 }
 
 // Tick runs one control step.
@@ -155,10 +178,16 @@ func (d *Daemon) Tick() {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.stopped {
+		return
+	}
 
 	st := &d.status
 	st.CPU, st.GPU, st.APU = reading.CPU, reading.GPU, reading.APU
 	st.Fans, st.FanRPM = reading.Fans, reading.FanRPM()
+	// The EC caps these fans near 2300 RPM; learn a higher ceiling if one shows up.
+	d.maxRPM = max(d.maxRPM, DefaultMaxRPM, st.FanRPM)
+	st.FanMaxRPM = d.maxRPM
 	st.UpdatedAt = now
 	st.Error = ""
 	st.Temp, st.Target = nil, nil
@@ -168,7 +197,8 @@ func (d *Daemon) Tick() {
 
 	if !d.settings.Enabled {
 		if d.manual {
-			d.release("turned off")
+			d.releaseStatus("turned off")
+			return
 		}
 		st.Controller, st.Duty = ipc.ControllerFirmware, nil
 		return
@@ -180,10 +210,17 @@ func (d *Daemon) Tick() {
 		}
 		st.Error = "Temperature sensors unavailable: " + readErr.Error()
 		if d.manual && now.Sub(d.sensorFailAt) >= SensorGrace {
-			d.release("no temperature readings")
+			d.releaseStatus("no CPU temperature")
+			if st.Controller == ipc.ControllerFirmware {
+				st.Error = "Temperature sensors unavailable, firmware took over: " + readErr.Error()
+			}
+			return
 		}
 		if !d.manual {
 			st.Controller, st.Duty = ipc.ControllerFirmware, nil
+		} else {
+			duty := d.lastDuty
+			st.Controller, st.Duty = ipc.ControllerOmaFan, &duty
 		}
 		return
 	}
@@ -199,8 +236,11 @@ func (d *Daemon) Tick() {
 			st.Error = "Couldn't set the fan speed: " + err.Error()
 			d.logf("set duty %d%%: %v", res.Duty, err)
 			if d.ecFailures >= MaxECFailures {
-				d.release("repeated EC errors")
-				st.Controller, st.Duty = ipc.ControllerFirmware, nil
+				msg := st.Error
+				d.releaseStatus("repeated EC errors")
+				if st.Controller == ipc.ControllerFirmware {
+					st.Error = msg + " · firmware took over"
+				}
 				return
 			}
 		} else {
@@ -249,6 +289,10 @@ func (d *Daemon) Status() ipc.Status {
 // Apply handles a request. Mutations are persisted before the reply.
 func (d *Daemon) Apply(req ipc.Request) error {
 	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return errors.New("OmaFan is shutting down")
+	}
 	next := d.settings
 	next.Custom = append([]curve.Point(nil), d.settings.Custom...)
 	switch req.Cmd {
@@ -293,11 +337,20 @@ func (d *Daemon) Apply(req ipc.Request) error {
 func (d *Daemon) Run(ctx context.Context, socket string) error {
 	d.Load()
 	d.mu.Lock()
-	d.release("startup")
+	// A previous run may have left manual duty behind; assume so until the EC confirms.
+	d.manual = true
+	_ = d.release("startup")
 	d.mu.Unlock()
 	defer func() {
 		d.mu.Lock()
-		d.release("shutdown")
+		d.stopped = true
+		for i := 0; i < 3; i++ {
+			d.manual = true
+			if d.release("shutdown") == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 		d.mu.Unlock()
 	}()
 
@@ -309,16 +362,37 @@ func (d *Daemon) Run(ctx context.Context, socket string) error {
 	go d.serve(ctx, ln)
 
 	d.Tick()
+	notify("READY=1")
 	t := time.NewTicker(Interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			notify("STOPPING=1")
 			return nil
 		case <-t.C:
 			d.Tick()
+			// A hung tick stops these, so systemd's watchdog restarts us and restore runs.
+			notify("WATCHDOG=1")
 		}
 	}
+}
+
+// notify sends a systemd sd_notify message when running under systemd.
+func notify(state string) {
+	addr := os.Getenv("NOTIFY_SOCKET")
+	if addr == "" {
+		return
+	}
+	if addr[0] == '@' {
+		addr = "\x00" + addr[1:]
+	}
+	conn, err := net.DialUnix("unixgram", nil, &net.UnixAddr{Name: addr, Net: "unixgram"})
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	_, _ = conn.Write([]byte(state))
 }
 
 func listen(socket string) (net.Listener, error) {
@@ -343,8 +417,12 @@ func listen(socket string) (net.Listener, error) {
 	return ln, nil
 }
 
+// MaxClients bounds concurrent connections so local users can't exhaust memory.
+const MaxClients = 32
+
 func (d *Daemon) serve(ctx context.Context, ln net.Listener) {
 	go func() { <-ctx.Done(); ln.Close() }()
+	slots := make(chan struct{}, MaxClients)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -355,7 +433,12 @@ func (d *Daemon) serve(ctx context.Context, ln net.Listener) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
-		go d.handle(conn)
+		select {
+		case slots <- struct{}{}:
+			go func() { defer func() { <-slots }(); d.handle(conn) }()
+		default:
+			conn.Close()
+		}
 	}
 }
 
@@ -366,7 +449,7 @@ func (d *Daemon) handle(conn net.Conn) {
 	reply := func(resp ipc.Response) { _ = json.NewEncoder(conn).Encode(resp) }
 
 	sc := bufio.NewScanner(conn)
-	sc.Buffer(make([]byte, 0, 4096), ipc.MaxMessage)
+	sc.Buffer(make([]byte, 0, 1024), ipc.MaxRequest)
 	if !sc.Scan() {
 		return
 	}

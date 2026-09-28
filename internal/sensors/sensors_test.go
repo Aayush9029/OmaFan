@@ -64,6 +64,16 @@ func TestReadFailsWithoutTemperatures(t *testing.T) {
 	}
 }
 
+func TestGPUAloneIsNotEnough(t *testing.T) {
+	root := t.TempDir()
+	write(t, root+"/hwmon0/name", "amdgpu")
+	write(t, root+"/hwmon0/temp1_label", "edge")
+	write(t, root+"/hwmon0/temp1_input", "40000")
+	if _, err := (Source{Root: root}).Read(); err != ErrNoSensors {
+		t.Fatalf("err = %v, want ErrNoSensors", err)
+	}
+}
+
 func TestBogusTemperatureIsIgnored(t *testing.T) {
 	root := fakeDesktop(t)
 	write(t, root+"/hwmon5/temp1_input", "-273000")

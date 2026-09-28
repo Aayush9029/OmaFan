@@ -14,10 +14,11 @@ import (
 )
 
 type fakeFans struct {
-	mu      sync.Mutex
-	duties  []int
-	autos   int
-	failSet bool
+	mu       sync.Mutex
+	duties   []int
+	autos    int
+	failSet  bool
+	failAuto int // fail this many Auto calls
 }
 
 func (f *fakeFans) SetDuty(p int) error {
@@ -29,7 +30,16 @@ func (f *fakeFans) SetDuty(p int) error {
 	f.duties = append(f.duties, p)
 	return nil
 }
-func (f *fakeFans) Auto() error  { f.mu.Lock(); f.autos++; f.mu.Unlock(); return nil }
+func (f *fakeFans) Auto() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.autos++
+	if f.failAuto > 0 {
+		f.failAuto--
+		return errors.New("ec busy")
+	}
+	return nil
+}
 func (f *fakeFans) Close() error { return nil }
 func (f *fakeFans) last() int {
 	f.mu.Lock()
@@ -93,11 +103,14 @@ func TestEnableAppliesCurveAndDisableReturnsToFirmware(t *testing.T) {
 	if err := d.Apply(ipc.Request{Cmd: "enable"}); err != nil {
 		t.Fatal(err)
 	}
-	if fans.last() != 55 {
-		t.Fatalf("balanced at 68°C sent %d%%, want 55", fans.last())
+	if fans.last() != 56 {
+		t.Fatalf("balanced at 68°C sent %d%%, want 56", fans.last())
 	}
 	st := d.Status()
-	if st.Controller != ipc.ControllerOmaFan || st.Duty == nil || *st.Duty != 55 {
+	if st.FanMaxRPM != DefaultMaxRPM {
+		t.Fatalf("fanMaxRpm = %d", st.FanMaxRPM)
+	}
+	if st.Controller != ipc.ControllerOmaFan || st.Duty == nil || *st.Duty != 56 {
 		t.Fatalf("status = %+v", st)
 	}
 	autos := fans.autos
@@ -184,7 +197,7 @@ func TestCurveIsValidatedPersistedAndReloaded(t *testing.T) {
 	again := &Daemon{StatePath: d.StatePath, Fans: &fakeFans{}, Sensors: &fakeSensors{temp: 50}}
 	again.Load()
 	st := again.Status()
-	if !st.Enabled || st.Profile != "custom" || curve.Format(st.Points) != "40:10,60:40,80:100" {
+	if !st.Enabled || st.Profile != "custom" || len(st.Points) != curve.MaxPoints || st.Points[0] != pts[0] {
 		t.Fatalf("reloaded = %+v", st)
 	}
 }
@@ -205,7 +218,7 @@ func TestRunReturnsFansToFirmwareOnShutdown(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if err != nil || !st.Enabled || fans.last() != 55 {
+	if err != nil || !st.Enabled || fans.last() != 56 {
 		t.Fatalf("enable over socket: %v %+v", err, st)
 	}
 	autos := fans.autos
@@ -242,5 +255,60 @@ func TestUnauthorizedPeerCanOnlyReadStatus(t *testing.T) {
 	}
 	if d.Status().Enabled {
 		t.Fatal("settings changed despite denial")
+	}
+}
+
+func TestFailedHandbackIsRetriedUntilTheECAccepts(t *testing.T) {
+	d, fans, _, clk := newDaemon(t)
+	_ = d.Apply(ipc.Request{Cmd: "enable"})
+	fans.failAuto = 2
+	autos := fans.autos
+	_ = d.Apply(ipc.Request{Cmd: "disable"})
+	if st := d.Status(); st.Controller == ipc.ControllerFirmware || st.Error == "" {
+		t.Fatalf("failed handback reported as done: %+v", st)
+	}
+	for i := 0; i < 3; i++ {
+		clk.advance(time.Second)
+		d.Tick()
+	}
+	if fans.autos != autos+3 {
+		t.Fatalf("Auto called %d times, want 3", fans.autos-autos)
+	}
+	if st := d.Status(); st.Controller != ipc.ControllerFirmware || st.Error != "" {
+		t.Fatalf("after retry status = %+v", st)
+	}
+	clk.advance(time.Second)
+	d.Tick()
+	if fans.autos != autos+3 {
+		t.Fatal("kept calling Auto after the EC accepted")
+	}
+}
+
+func TestSensorLossRetriesHandback(t *testing.T) {
+	d, fans, sens, clk := newDaemon(t)
+	_ = d.Apply(ipc.Request{Cmd: "enable"})
+	sens.err = sensors.ErrNoSensors
+	fans.failAuto = 1
+	autos := fans.autos
+	for i := 0; i < 8; i++ {
+		clk.advance(time.Second)
+		d.Tick()
+	}
+	if fans.autos != autos+2 || d.Status().Controller != ipc.ControllerFirmware {
+		t.Fatalf("autos = %d, status %+v", fans.autos-autos, d.Status())
+	}
+}
+
+func TestStoppedDaemonRefusesChanges(t *testing.T) {
+	d, fans, _, _ := newDaemon(t)
+	d.mu.Lock()
+	d.stopped = true
+	d.mu.Unlock()
+	if err := d.Apply(ipc.Request{Cmd: "enable"}); err == nil {
+		t.Fatal("stopped daemon accepted enable")
+	}
+	d.Tick()
+	if fans.last() != -1 {
+		t.Fatal("stopped daemon set a duty")
 	}
 }

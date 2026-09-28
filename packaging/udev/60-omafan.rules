@@ -1,0 +1,2 @@
+# Start OmaFan once the Framework EC device exists, so boot order can't skip it.
+SUBSYSTEM=="misc", KERNEL=="cros_ec", TAG+="systemd", ENV{SYSTEMD_WANTS}+="omafan.service"

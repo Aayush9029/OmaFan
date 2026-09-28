@@ -17,8 +17,11 @@ import (
 // DefaultSocket is created by the daemon through systemd's RuntimeDirectory.
 const DefaultSocket = "/run/omafan/omafan.sock"
 
-// MaxMessage bounds a single request or response line.
-const MaxMessage = 64 << 10
+// MaxRequest bounds a request line; MaxMessage bounds a response line.
+const (
+	MaxRequest = 4 << 10
+	MaxMessage = 64 << 10
+)
 
 // Controllers reported in Status.Controller.
 const (
@@ -51,6 +54,7 @@ type Status struct {
 	APU        *float64                 `json:"apu"`
 	Fans       []sensors.Fan            `json:"fans"`
 	FanRPM     int                      `json:"fanRpm"`
+	FanMaxRPM  int                      `json:"fanMaxRpm"`
 	Error      string                   `json:"error"`
 	UpdatedAt  time.Time                `json:"updatedAt"`
 }

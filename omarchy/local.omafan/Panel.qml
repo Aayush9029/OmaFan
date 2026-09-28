@@ -24,6 +24,12 @@ Panel {
   // Custom curve being dragged or saved; null once the daemon has it.
   property var draft: null
   property string sentDraft: ""
+  // A status reply only confirms a command if its poll started after the command finished.
+  property int pollGen: 0
+  property int runningPollGen: 0
+  property int actionGen: 0
+  property bool pendingRefresh: false
+  property double actionErrorAt: 0
 
   readonly property bool connected: snapshot !== null && lastError === ""
   readonly property bool busy: actionProc.running
@@ -40,12 +46,14 @@ Panel {
   readonly property bool driving: controller === "omafan" || controller === "emergency"
 
   readonly property real cpuTemp: num(snapshot ? snapshot.cpu : null, num(snapshot ? snapshot.apu : null, 0))
+  readonly property bool hasGpu: snapshot !== null && num(snapshot.gpu, null) !== null
   readonly property real gpuTemp: num(snapshot ? snapshot.gpu : null, 0)
   readonly property real controlTemp: num(snapshot ? snapshot.temp : null, cpuTemp)
   readonly property int fanRpm: snapshot ? Number(snapshot.fanRpm || 0) : 0
-  // Duty when OmaFan drives; otherwise RPM against the EC's 2300 RPM ceiling.
+  readonly property int fanMaxRpm: Math.max(1, snapshot ? Number(snapshot.fanMaxRpm || 2320) : 2320)
+  // Commanded duty when OmaFan drives; otherwise the measured speed as a share of full speed.
   readonly property real fanPercent: snapshot && snapshot.duty !== null && snapshot.duty !== undefined
-    ? Number(snapshot.duty) : Math.min(100, fanRpm / 2300 * 100)
+    ? Number(snapshot.duty) : Math.min(100, fanRpm / fanMaxRpm * 100)
 
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -65,7 +73,8 @@ Panel {
   }
 
   function refresh() {
-    if (statusProc.running) return
+    if (statusProc.running) { pendingRefresh = true; return }
+    runningPollGen = ++pollGen
     statusProc.running = true
   }
 
@@ -77,14 +86,13 @@ Panel {
   }
 
   function setEnabled(on) {
-    if (!connected) return
+    if (!connected || busy) return
     desiredEnabled = on ? 1 : 0
     run([on ? "enable" : "disable"])
   }
 
   function selectProfile(value) {
-    if (!controlEnabled || !connected) return
-    saveTimer.stop()
+    if (!controlEnabled || !connected || busy || saveTimer.running) return
     draft = null
     desiredProfile = value
     run(["profile", value])
@@ -134,9 +142,18 @@ Panel {
         var raw = String(text || "").trim()
         if (raw === "") return
         try {
-          app.snapshot = JSON.parse(raw)
+          var next = JSON.parse(raw)
+          app.snapshot = next
           app.lastError = ""
-          if (!actionProc.running) { app.desiredEnabled = -1; app.desiredProfile = "" }
+          // Only a poll that began after the last command finished reflects it.
+          if (!actionProc.running && app.runningPollGen > app.actionGen) {
+            app.desiredEnabled = -1
+            app.desiredProfile = ""
+            if (app.draft && !saveTimer.running && Model.formatPoints(app.draft) === app.sentDraft
+                && Model.validPoints(next.custom) && Model.formatPoints(next.custom) === app.sentDraft)
+              app.draft = null
+            if (app.actionError !== "" && Date.now() - app.actionErrorAt > 4000) app.actionError = ""
+          }
         } catch (error) {
           app.lastError = "Invalid reply from omafan"
         }
@@ -149,6 +166,14 @@ Panel {
         if (message !== "") app.lastError = message.replace(/^omafan:\s*/, "")
       }
     }
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        Qt.callLater(function() { if (app.lastError === "") app.lastError = "omafan status failed" })
+      if (app.pendingRefresh) {
+        app.pendingRefresh = false
+        Qt.callLater(app.refresh)
+      }
+    }
   }
 
   Process {
@@ -157,14 +182,15 @@ Panel {
     stderr: StdioCollector { id: actionStderr; waitForEnd: true }
     onExited: function(exitCode) {
       var wasCurve = String(actionProc.command[1]) === "curve"
-      if (exitCode === 0) {
-        // Keep a newer drag that arrived while this one was saving.
+      // Polls already in flight predate this command; the next one confirms it.
+      app.actionGen = app.pollGen
+      if (exitCode !== 0) {
+        // Keep a newer drag that arrived while this one was saving; it saves next.
         if (wasCurve && app.draft && Model.formatPoints(app.draft) === app.sentDraft && !saveTimer.running) app.draft = null
-      } else {
-        if (wasCurve) app.draft = null
         app.desiredEnabled = -1
         app.desiredProfile = ""
         app.actionError = String(actionStderr.text || "").trim().replace(/^omafan:\s*/, "") || "Couldn't change the fan settings."
+        app.actionErrorAt = Date.now()
       }
       app.refresh()
     }
@@ -243,13 +269,11 @@ Panel {
               color: app.foreground
               font.family: app.fontFamily
               font.pixelSize: Style.font.display
-              // Spins at a pace that follows the fan.
-              RotationAnimator on rotation {
-                from: 0
-                to: 360
-                loops: Animation.Infinite
-                duration: Math.round(2400 / Math.max(0.15, app.fanRpm / 2300))
+              id: heroFan
+              // Spins at a pace that follows the fan, updating as the speed changes.
+              FrameAnimation {
                 running: app.opened && app.fanRpm > 0
+                onTriggered: heroFan.rotation = (heroFan.rotation + frameTime * 150 * app.fanRpm / app.fanMaxRpm) % 360
               }
             }
           }
@@ -280,8 +304,8 @@ Panel {
           readonly property real cell: (width - spacing * 2) / 3
 
           StatCell { width: parent.cell; label: "CPU"; value: app.snapshot ? Math.round(app.cpuTemp) : "—"; unit: "°C"; fraction: app.cpuTemp / 100 }
-          StatCell { width: parent.cell; label: "GPU"; value: app.snapshot && app.snapshot.gpu !== null ? Math.round(app.gpuTemp) : "—"; unit: "°C"; fraction: app.gpuTemp / 100 }
-          StatCell { width: parent.cell; label: "Fan"; value: Model.formatRpm(app.fanRpm); unit: "RPM"; fraction: app.fanPercent / 100 }
+          StatCell { width: parent.cell; label: "GPU"; value: app.hasGpu ? Math.round(app.gpuTemp) : "—"; unit: "°C"; fraction: app.gpuTemp / 100 }
+          StatCell { width: parent.cell; label: "Fan"; value: Model.formatRpm(app.fanRpm); unit: "RPM"; fraction: app.fanRpm / app.fanMaxRpm }
         }
 
         PanelSeparator { foreground: app.foreground }
@@ -359,6 +383,7 @@ Panel {
             points: app.points
             currentTemp: app.controlTemp
             interactive: app.controlEnabled && app.connected
+            active: app.opened
             foreground: app.foreground
             fontFamily: app.fontFamily
             onPointsEdited: function(next) { app.editCurve(next) }

@@ -1,15 +1,22 @@
 [Unit]
 Description=OmaFan fan control for the Framework Desktop
 Documentation=https://github.com/Aayush9029/OmaFan
+# 60-omafan.rules tags /dev/cros_ec so this unit waits for the device.
+After=dev-cros_ec.device
 ConditionPathExists=/dev/cros_ec
+StartLimitIntervalSec=60
+StartLimitBurst=10
 
 [Service]
-Type=simple
+Type=notify
 ExecStart=/usr/local/bin/omafan daemon
 # Runs after every stop, including crashes: the firmware always gets the fans back.
 ExecStopPost=/usr/local/bin/omafan restore
-Restart=on-failure
+Restart=always
 RestartSec=2
+# A hung control loop stops the heartbeat; systemd kills it and restore runs.
+WatchdogSec=10
+TimeoutStopSec=10
 StateDirectory=omafan
 RuntimeDirectory=omafan
 RuntimeDirectoryMode=0755
@@ -35,6 +42,13 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+UMask=0022
+IPAddressDeny=any
+MemoryMax=64M
 
 [Install]
 WantedBy=multi-user.target
